@@ -1,0 +1,6 @@
+{
+  "name": "Charglee Simulator",
+  "description": "OCPP 1.6 / 2.0.1 simulator for Charglee charging networks, featuring fleet administration and real-time monitoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
