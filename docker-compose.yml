@@ -3,6 +3,6 @@ services:
   simulator:
     build: .
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
       - VITE_PORT=3000
