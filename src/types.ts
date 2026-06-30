@@ -36,6 +36,7 @@ export interface ChargerConfig {
   chargePointId: string;
   ocppVersion: OcppVersion;
   reconnectInterval: number;
+  meterValueInterval?: number;
 }
 
 export interface ChargerState {
@@ -43,9 +44,14 @@ export interface ChargerState {
   status: ConnectorStatus;
   isAuthorized: boolean;
   authorizedIdTag: string | null;
-  transactionId: string | null;
+  transactionId: string | number | null;
   meterValue: number; // in Wh
   power: number; // in W
+  voltage: number; // in V
+  current: number; // in A
+  soc: number; // in %
+  sessionDuration: number; // in seconds
+  seqNo: number;
   lastHeartbeat: Date | null;
   logs: OcppLogEntry[];
 }

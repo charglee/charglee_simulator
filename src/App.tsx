@@ -24,6 +24,7 @@ export default function App() {
       chargePointId: 'EVSE-ALPHA-01',
       ocppVersion: OcppVersion.V201,
       reconnectInterval: 5000,
+      meterValueInterval: 5,
     }
   ]);
   const [activeChargerId, setActiveChargerId] = useState<string>(chargers[0].id);
@@ -37,6 +38,7 @@ export default function App() {
       chargePointId: `EVSE-NEW-${Math.floor(Math.random() * 1000)}`,
       ocppVersion: OcppVersion.V201,
       reconnectInterval: 5000,
+      meterValueInterval: 5,
     };
     setChargers(prev => [...prev, newCharger]);
     setActiveChargerId(newId);
@@ -227,6 +229,21 @@ export default function App() {
                           className={`py-5 rounded-2xl border-2 font-black transition-all ${activeCharger.ocppVersion === ver ? 'bg-black text-white border-black' : 'bg-transparent border-[#E5E5E5] hover:border-[#FF8C00]/30'}`}
                         >
                           OCPP {ver === OcppVersion.V16 ? '1.6 J' : '2.0.1'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <label className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 px-1">OCPP Telemetry Frequency (MeterValues)</label>
+                    <div className="grid grid-cols-4 gap-4">
+                      {[1, 5, 10, 30].map(sec => (
+                        <button
+                          key={sec}
+                          onClick={() => updateChargerConfig(activeCharger.id, { meterValueInterval: sec })}
+                          className={`py-4 rounded-2xl border-2 font-black text-xs transition-all ${(activeCharger.meterValueInterval || 5) === sec ? 'bg-[#FF8C00] text-black border-[#FF8C00]' : 'bg-transparent border-[#E5E5E5] hover:border-[#FF8C00]/30'}`}
+                        >
+                          Every {sec}s
                         </button>
                       ))}
                     </div>

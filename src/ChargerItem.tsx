@@ -13,7 +13,9 @@ import {
   History,
   CheckCircle2,
   Cpu,
-  Info
+  Info,
+  Send,
+  Gauge
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -47,6 +49,11 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
     transactionId: null,
     meterValue: 0,
     power: 0,
+    voltage: 230,
+    current: 0,
+    soc: 20,
+    sessionDuration: 0,
+    seqNo: 0,
     lastHeartbeat: null,
     logs: []
   });
@@ -54,10 +61,21 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
   const wsRef = useRef<WebSocket | null>(null);
   const meterIntervalRef = useRef<number | null>(null);
   const stateRef = useRef(chargerState);
+  const pendingRequestsRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
     stateRef.current = chargerState;
   }, [chargerState]);
+
+  const formatDuration = (totalSeconds: number) => {
+    const hrs = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    if (hrs > 0) {
+      return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const addLog = useCallback((type: OcppLogEntry['type'], payload: any, action?: string, messageId?: string) => {
     const newEntry: OcppLogEntry = {
@@ -75,12 +93,149 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
   const sendOcppMessage = useCallback((action: string, payload: any) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       addLog('error', 'Cannot send message: WebSocket is not open');
-      return;
+      return null;
     }
     const message = createOcppCall(action, payload);
+    const messageId = message[1] as string;
+    pendingRequestsRef.current.set(messageId, action);
     wsRef.current.send(JSON.stringify(message));
-    addLog('sent', payload, action, message[1] as string);
+    addLog('sent', payload, action, messageId);
+    return messageId;
   }, [addLog]);
+
+  const sendMeterValues = useCallback(() => {
+    const currentState = stateRef.current;
+    if (currentState.status !== 'Charging' || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    const energyWh = Math.floor(currentState.meterValue);
+    const powerW = Math.floor(currentState.power);
+    const voltageV = currentState.voltage || 230;
+    const currentA = parseFloat((powerW / voltageV).toFixed(2));
+    const socPercent = Math.min(100, Math.floor(currentState.soc || (20 + (currentState.meterValue / 200))));
+    const nowIso = new Date().toISOString();
+
+    if (config.ocppVersion === OcppVersion.V201) {
+      const nextSeqNo = (currentState.seqNo || 0) + 1;
+      setChargerState(prev => {
+        const next = { ...prev, seqNo: nextSeqNo, current: currentA, soc: socPercent };
+        stateRef.current = next;
+        return next;
+      });
+
+      const payload = {
+        eventType: 'Updated',
+        timestamp: nowIso,
+        triggerReason: 'MeterValuePeriodic',
+        seqNo: nextSeqNo,
+        transactionInfo: {
+          transactionId: String(currentState.transactionId || '1')
+        },
+        evseId: 1,
+        connectorId: 1,
+        meterValue: [
+          {
+            timestamp: nowIso,
+            sampledValue: [
+              {
+                value: energyWh,
+                context: 'Sample.Periodic',
+                measurand: 'Energy.Active.Import.Register',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'Wh' }
+              },
+              {
+                value: powerW,
+                context: 'Sample.Periodic',
+                measurand: 'Power.Active.Import',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'W' }
+              },
+              {
+                value: currentA,
+                context: 'Sample.Periodic',
+                measurand: 'Current.Import',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'A' }
+              },
+              {
+                value: voltageV,
+                context: 'Sample.Periodic',
+                measurand: 'Voltage',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'V' }
+              },
+              {
+                value: socPercent,
+                context: 'Sample.Periodic',
+                measurand: 'SoC',
+                location: 'EV',
+                unitOfMeasure: { unit: 'Percent' }
+              }
+            ]
+          }
+        ]
+      };
+      sendOcppMessage('TransactionEvent', payload);
+    } else {
+      setChargerState(prev => {
+        const next = { ...prev, current: currentA, soc: socPercent };
+        stateRef.current = next;
+        return next;
+      });
+      const payload = {
+        connectorId: 1,
+        transactionId: currentState.transactionId !== null ? Number(currentState.transactionId) : 1,
+        meterValue: [
+          {
+            timestamp: nowIso,
+            sampledValue: [
+              {
+                value: energyWh.toString(),
+                context: 'Sample.Periodic',
+                format: 'Raw',
+                measurand: 'Energy.Active.Import.Register',
+                location: 'Outlet',
+                unit: 'Wh'
+              },
+              {
+                value: powerW.toString(),
+                context: 'Sample.Periodic',
+                format: 'Raw',
+                measurand: 'Power.Active.Import',
+                location: 'Outlet',
+                unit: 'W'
+              },
+              {
+                value: currentA.toString(),
+                context: 'Sample.Periodic',
+                format: 'Raw',
+                measurand: 'Current.Import',
+                location: 'Outlet',
+                unit: 'A'
+              },
+              {
+                value: voltageV.toString(),
+                context: 'Sample.Periodic',
+                format: 'Raw',
+                measurand: 'Voltage',
+                location: 'Outlet',
+                unit: 'V'
+              },
+              {
+                value: socPercent.toString(),
+                context: 'Sample.Periodic',
+                format: 'Raw',
+                measurand: 'SoC',
+                location: 'EV',
+                unit: 'Percent'
+              }
+            ]
+          }
+        ]
+      };
+      sendOcppMessage('MeterValues', payload);
+    }
+  }, [config.ocppVersion, sendOcppMessage]);
 
   // Simulation Actions
   const sendBootNotification = () => {
@@ -111,59 +266,165 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
   const startTransaction = useCallback((idTag?: string) => {
     const transactionId = crypto.randomUUID();
     const tag = idTag || stateRef.current.authorizedIdTag || 'DEMO';
+    const nowIso = new Date().toISOString();
+    const currentMeter = Math.floor(stateRef.current.meterValue);
+    const powerW = stateRef.current.power || 11000;
+    const voltageV = stateRef.current.voltage || 230;
+    const currentA = parseFloat((powerW / voltageV).toFixed(2));
+    const startSoc = Math.min(100, Math.floor(20 + (currentMeter / 200)));
     
-    const payload = config.ocppVersion === OcppVersion.V201
-      ? { 
-          timestamp: new Date().toISOString(), 
-          triggerReason: 'Authorized', 
-          transactionInfo: { transactionId }, 
-          evseId: 1, 
-          connectorId: 1, 
-          eventType: 'Started',
-          idToken: { idToken: tag, type: 'ISO14443' }
-        }
-      : { 
-          connectorId: 1, 
-          idTag: tag, 
-          meterStart: Math.floor(stateRef.current.meterValue), 
-          timestamp: new Date().toISOString() 
-        };
+    setChargerState(prev => {
+      const next = { 
+        ...prev, 
+        status: 'Charging' as ConnectorStatus, 
+        transactionId, 
+        power: powerW,
+        voltage: voltageV,
+        current: currentA,
+        soc: startSoc,
+        sessionDuration: 0,
+        seqNo: 0,
+        isAuthorized: true,
+        authorizedIdTag: tag
+      };
+      stateRef.current = next;
+      return next;
+    });
     
-    setChargerState(prev => ({ 
-      ...prev, 
-      status: 'Charging', 
-      transactionId, 
-      power: 11000,
-      isAuthorized: true,
-      authorizedIdTag: tag
-    }));
+    if (config.ocppVersion === OcppVersion.V201) {
+      const payload = { 
+        timestamp: nowIso, 
+        triggerReason: 'Authorized', 
+        seqNo: 0,
+        transactionInfo: { transactionId }, 
+        evseId: 1, 
+        connectorId: 1, 
+        eventType: 'Started',
+        idToken: { idToken: tag, type: 'ISO14443' },
+        meterValue: [
+          {
+            timestamp: nowIso,
+            sampledValue: [
+              {
+                value: currentMeter,
+                context: 'Transaction.Begin',
+                measurand: 'Energy.Active.Import.Register',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'Wh' }
+              },
+              {
+                value: powerW,
+                context: 'Transaction.Begin',
+                measurand: 'Power.Active.Import',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'W' }
+              },
+              {
+                value: currentA,
+                context: 'Transaction.Begin',
+                measurand: 'Current.Import',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'A' }
+              },
+              {
+                value: voltageV,
+                context: 'Transaction.Begin',
+                measurand: 'Voltage',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'V' }
+              },
+              {
+                value: startSoc,
+                context: 'Transaction.Begin',
+                measurand: 'SoC',
+                location: 'EV',
+                unitOfMeasure: { unit: 'Percent' }
+              }
+            ]
+          }
+        ]
+      };
+      sendOcppMessage('TransactionEvent', payload);
+    } else {
+      const payload = { 
+        connectorId: 1, 
+        idTag: tag, 
+        meterStart: currentMeter, 
+        timestamp: nowIso 
+      };
+      sendOcppMessage('StartTransaction', payload);
+    }
     
-    sendOcppMessage(config.ocppVersion === OcppVersion.V201 ? 'TransactionEvent' : 'StartTransaction', payload);
     sendStatusNotification('Charging');
   }, [config.ocppVersion, sendOcppMessage]);
 
   const stopTransaction = useCallback(() => {
-    const payload = config.ocppVersion === OcppVersion.V201
-      ? { 
-          timestamp: new Date().toISOString(), 
-          triggerReason: 'RemoteStop', 
-          transactionInfo: { 
-            transactionId: stateRef.current.transactionId, 
-            stoppedReason: 'StoppedByEV' 
-          }, 
-          evseId: 1, 
-          connectorId: 1, 
-          eventType: 'Ended' 
-        }
-      : { 
-          idTag: stateRef.current.authorizedIdTag, 
-          meterStop: Math.floor(stateRef.current.meterValue), 
-          timestamp: new Date().toISOString(), 
-          transactionId: 100 
-        };
+    const nowIso = new Date().toISOString();
+    const currentMeter = Math.floor(stateRef.current.meterValue);
+    const powerW = stateRef.current.power;
+    const voltageV = stateRef.current.voltage || 230;
+    const txId = stateRef.current.transactionId;
+
+    if (config.ocppVersion === OcppVersion.V201) {
+      const endSeqNo = (stateRef.current.seqNo || 0) + 1;
+      const payload = { 
+        timestamp: nowIso, 
+        triggerReason: 'RemoteStop', 
+        seqNo: endSeqNo,
+        transactionInfo: { 
+          transactionId: String(txId || '1'), 
+          stoppedReason: 'StoppedByEV' 
+        }, 
+        evseId: 1, 
+        connectorId: 1, 
+        eventType: 'Ended',
+        meterValue: [
+          {
+            timestamp: nowIso,
+            sampledValue: [
+              {
+                value: currentMeter,
+                context: 'Transaction.End',
+                measurand: 'Energy.Active.Import.Register',
+                location: 'Outlet',
+                unitOfMeasure: { unit: 'Wh' }
+              }
+            ]
+          }
+        ]
+      };
+      sendOcppMessage('TransactionEvent', payload);
+    } else {
+      const numTxId = txId !== null ? Number(txId) : 1;
+      const payload = { 
+        idTag: stateRef.current.authorizedIdTag || 'DEMO', 
+        meterStop: currentMeter, 
+        timestamp: nowIso, 
+        transactionId: numTxId,
+        transactionData: [
+          {
+            timestamp: nowIso,
+            sampledValue: [
+              {
+                value: currentMeter.toString(),
+                context: 'Transaction.End',
+                format: 'Raw',
+                measurand: 'Energy.Active.Import.Register',
+                location: 'Outlet',
+                unit: 'Wh'
+              }
+            ]
+          }
+        ]
+      };
+      sendOcppMessage('StopTransaction', payload);
+    }
     
-    setChargerState(prev => ({ ...prev, status: 'Available', transactionId: null, isAuthorized: false, power: 0 }));
-    sendOcppMessage(config.ocppVersion === OcppVersion.V201 ? 'TransactionEvent' : 'StopTransaction', payload);
+    setChargerState(prev => {
+      const next = { ...prev, status: 'Available' as ConnectorStatus, transactionId: null, isAuthorized: false, power: 0, current: 0 };
+      stateRef.current = next;
+      return next;
+    });
     sendStatusNotification('Available');
   }, [config.ocppVersion, sendOcppMessage]);
 
@@ -226,9 +487,22 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
               }, 200);
             }
           } else if (type === MessageType.CALL_RESULT) {
-            addLog('received', action, 'Result', messageId);
+            const sentAction = pendingRequestsRef.current.get(messageId);
+            addLog('received', action, sentAction ? `${sentAction} Result` : 'Result', messageId);
+            
+            // Capture transactionId assigned by CSMS (OCPP 1.6)
+            if (sentAction === 'StartTransaction' && action && typeof action === 'object' && action.transactionId !== undefined) {
+              setChargerState(prev => {
+                const next = { ...prev, transactionId: action.transactionId };
+                stateRef.current = next;
+                return next;
+              });
+            }
+            if (messageId) pendingRequestsRef.current.delete(messageId);
           } else if (type === MessageType.CALL_ERROR) {
-            addLog('error', action, 'Error', messageId);
+            const sentAction = pendingRequestsRef.current.get(messageId);
+            addLog('error', action, sentAction ? `${sentAction} Error` : 'Error', messageId);
+            if (messageId) pendingRequestsRef.current.delete(messageId);
           }
         } catch (e) { 
           addLog('error', 'Failed to parse incoming message'); 
@@ -248,12 +522,38 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
 
   useEffect(() => {
     if (chargerState.status === 'Charging') {
+      let secondsCounter = 0;
+      const intervalSec = config.meterValueInterval || 5;
+
       meterIntervalRef.current = window.setInterval(() => {
-        setChargerState(prev => ({ ...prev, meterValue: prev.meterValue + (prev.power / 3600) }));
+        secondsCounter += 1;
+        setChargerState(prev => {
+          const newMeterValue = prev.meterValue + (prev.power / 3600);
+          const newDuration = prev.sessionDuration + 1;
+          const newSoc = Math.min(100, Math.floor(20 + (newMeterValue / 200)));
+          const newCurrent = parseFloat((prev.power / (prev.voltage || 230)).toFixed(2));
+          const nextState = {
+            ...prev,
+            meterValue: newMeterValue,
+            sessionDuration: newDuration,
+            soc: newSoc,
+            current: newCurrent
+          };
+          stateRef.current = nextState;
+          return nextState;
+        });
+
+        if (secondsCounter % intervalSec === 0) {
+          sendMeterValues();
+        }
       }, 1000);
-    } else { if (meterIntervalRef.current) clearInterval(meterIntervalRef.current); }
-    return () => { if (meterIntervalRef.current) clearInterval(meterIntervalRef.current); };
-  }, [chargerState.status, chargerState.power]);
+    } else { 
+      if (meterIntervalRef.current) clearInterval(meterIntervalRef.current); 
+    }
+    return () => { 
+      if (meterIntervalRef.current) clearInterval(meterIntervalRef.current); 
+    };
+  }, [chargerState.status, config.meterValueInterval, sendMeterValues]);
 
   if (!isActive) return null;
 
@@ -281,11 +581,11 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
               </div>
             </div>
           </div>
-          <div className="flex-1 grid grid-cols-2 gap-6 w-full">
+          <div className="flex-1 grid grid-cols-2 gap-4 w-full">
             <StatBlock label="Status" value={chargerState.status} icon={<CheckCircle2 className="w-5 h-5 text-[#FF8C00]" />} />
-            <StatBlock label="Power" value={`${chargerState.power} W`} icon={<Cpu className="w-5 h-5 text-[#FF8C00]" />} />
-            <StatBlock label="Energy" value={`${(chargerState.meterValue / 1000).toFixed(3)} kWh`} icon={<RotateCcw className="w-5 h-5 text-[#FF4500]" />} />
-            <StatBlock label="RFID" value={chargerState.isAuthorized ? chargerState.authorizedIdTag || 'AUTH' : 'WAITING'} icon={<ShieldCheck className={`w-5 h-5 ${chargerState.isAuthorized ? 'text-[#FF8C00]' : 'text-[#333333]/30'}`} />} />
+            <StatBlock label="Power / Current" value={`${(chargerState.power / 1000).toFixed(1)}kW (${chargerState.current}A)`} icon={<Cpu className="w-5 h-5 text-[#FF8C00]" />} />
+            <StatBlock label="Energy Import" value={`${(chargerState.meterValue / 1000).toFixed(3)} kWh`} icon={<RotateCcw className="w-5 h-5 text-[#FF4500]" />} />
+            <StatBlock label="Duration / SoC" value={`${formatDuration(chargerState.sessionDuration)} (${chargerState.soc || 20}%)`} icon={<Gauge className="w-5 h-5 text-[#FF8C00]" />} />
           </div>
         </section>
 
@@ -331,6 +631,39 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
                     <button onClick={stopTransaction} disabled={!isConnected || chargerState.status !== 'Charging'} className="flex-1 py-4 px-6 rounded-2xl bg-[#F9F9F9] text-[#333333] border border-[#E5E5E5] font-black flex items-center justify-center gap-2 disabled:opacity-20 transition-all text-xs tracking-widest uppercase">STOP</button>
                   </div>
                   
+                  <div className="flex flex-col gap-2 pt-2 border-t border-[#E5E5E5]">
+                    <span className="text-[9px] font-black uppercase opacity-30 px-1">Power Output Profile</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[3700, 7400, 11000, 22000, 50000, 150000].map(pw => (
+                        <button
+                          key={pw}
+                          onClick={() => {
+                            setChargerState(prev => {
+                              const newV = pw >= 50000 ? 400 : 230;
+                              const newI = parseFloat((pw / newV).toFixed(2));
+                              const next = { ...prev, power: pw, voltage: newV, current: newI };
+                              stateRef.current = next;
+                              return next;
+                            });
+                          }}
+                          className={`py-1.5 px-2 rounded-xl text-[9px] font-black uppercase transition-all ${chargerState.power === pw ? 'bg-black text-[#FF8C00]' : 'bg-[#F9F9F9] border border-[#E5E5E5] text-[#333333] hover:border-[#FF8C00]/40'}`}
+                        >
+                          {pw >= 1000 ? `${pw / 1000} kW` : `${pw} W`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pt-1">
+                    <button
+                      onClick={sendMeterValues}
+                      disabled={!isConnected || chargerState.status !== 'Charging'}
+                      className="w-full py-3 rounded-xl bg-[#FF8C00]/20 text-black border border-[#FF8C00]/40 font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-[#FF8C00] transition-all disabled:opacity-20 shadow-sm"
+                    >
+                      <Send className="w-3.5 h-3.5" /> Send OCPP Telemetry Now
+                    </button>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-3 pt-2 border-t border-[#E5E5E5]">
                     <div className="flex flex-col gap-1">
                       <span className="text-[9px] font-black uppercase opacity-30 px-1">Remote CMS Mock</span>
@@ -405,15 +738,18 @@ export const ChargerItem: React.FC<Props> = ({ config, isActive, onRemove }) => 
 }
 
 function StatBlock({ label, value, icon }: { label: string, value: string, icon: React.ReactNode }) {
+  const firstSpaceIdx = value.indexOf(' ');
+  const mainVal = firstSpaceIdx !== -1 ? value.substring(0, firstSpaceIdx) : value;
+  const unitVal = firstSpaceIdx !== -1 ? value.substring(firstSpaceIdx + 1) : '';
   return (
     <div className="bg-[#F9F9F9]/30 p-6 rounded-[24px] border border-[#E5E5E5] flex flex-col gap-3 group hover:border-[#FF8C00]/30 transition-all shadow-sm">
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-black text-[#333333]/40 uppercase tracking-[0.15em]">{label}</span>
         <div className="p-1.5 bg-white rounded-lg shadow-sm">{icon}</div>
       </div>
-      <div className="flex items-baseline gap-1">
-        <span className="text-xl font-black text-black">{value.split(' ')[0]}</span>
-        <span className="text-[10px] font-medium opacity-40">{value.split(' ')[1] || ''}</span>
+      <div className="flex items-baseline gap-1.5 overflow-hidden">
+        <span className="text-xl font-black text-black truncate">{mainVal}</span>
+        <span className="text-[10px] font-medium opacity-40 truncate">{unitVal}</span>
       </div>
     </div>
   );
